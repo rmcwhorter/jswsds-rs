@@ -1,6 +1,6 @@
 use futures_channel::mpsc::{unbounded, UnboundedSender};
-use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
-use serde::{Serialize};
+use futures_util::{StreamExt};
+use serde::Serialize;
 /**
  * how does this work?
  * firstly, we have some source of data
@@ -8,13 +8,10 @@ use serde::{Serialize};
  * we forward that data along
 */
 use std::{
-    marker::Send,
     collections::HashMap,
+    marker::Send,
     net::SocketAddr,
-    sync::{
-        mpsc::{Receiver},
-        Arc, Mutex
-    },
+    sync::{mpsc::Receiver, Arc, Mutex},
 };
 use tokio::{
     net::{TcpListener, TcpStream, ToSocketAddrs},
@@ -22,10 +19,10 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::protocol::Message;
 
-use anyhow::{Result};
+use anyhow::Result;
 
-pub type Tx = UnboundedSender<Message>;
-pub type Am<T> = Arc<Mutex<T>>;
+type Tx = UnboundedSender<Message>;
+type Am<T> = Arc<Mutex<T>>;
 pub type PubSubState = Am<HashMap<SocketAddr, Tx>>;
 
 /**
@@ -60,11 +57,13 @@ async fn ballista(recipients: PubSubState, message: Message) {
     }
 }
 
-
 async fn listener<K: ToSocketAddrs>(bind_addr: K, state: PubSubState) -> Result<()> {
     let tcp_socket = TcpListener::bind(bind_addr).await?;
-    println!("[SUCCESS]: LISTENER BOUND TO {}", tcp_socket.local_addr().unwrap());
-    
+    println!(
+        "[SUCCESS]: LISTENER BOUND TO {}",
+        tcp_socket.local_addr().unwrap()
+    );
+
     while let Ok((stream, addr)) = tcp_socket.accept().await {
         println!("Spawning new conn!");
         tokio::spawn(json_server_conn_handler(state.clone(), stream, addr));
@@ -74,7 +73,7 @@ async fn listener<K: ToSocketAddrs>(bind_addr: K, state: PubSubState) -> Result<
     Ok(())
 }
 
-pub async fn json_server_conn_handler(state: PubSubState, raw_stream: TcpStream, addr: SocketAddr) {
+async fn json_server_conn_handler(state: PubSubState, raw_stream: TcpStream, addr: SocketAddr) {
     //println!("Incoming TCP connection from: {}", addr);
 
     let ws_stream = tokio_tungstenite::accept_async(raw_stream)
@@ -84,7 +83,7 @@ pub async fn json_server_conn_handler(state: PubSubState, raw_stream: TcpStream,
     let (tx, rx) = unbounded();
     state.lock().unwrap().insert(addr, tx);
 
-    let (outgoing, incoming) = ws_stream.split();
+    let (outgoing, _) = ws_stream.split();
 
     let receiver = rx.map(Ok).forward(outgoing);
     receiver.await;
@@ -92,7 +91,10 @@ pub async fn json_server_conn_handler(state: PubSubState, raw_stream: TcpStream,
     state.lock().unwrap().remove(&addr);
 }
 
-pub async fn launch_server<T: Serialize + Send + 'static, U: ToSocketAddrs + Send + 'static>(source: Receiver<T>, addr: U) {
+pub async fn launch_server<T: Serialize + Send + 'static, U: ToSocketAddrs + Send + 'static>(
+    source: Receiver<T>,
+    addr: U,
+) {
     let state: PubSubState = Arc::new(Mutex::new(HashMap::new()));
     task::spawn(listener(addr, state.clone()));
     task::spawn(data_intermediary(source, state.clone()));
