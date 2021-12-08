@@ -25,7 +25,7 @@ type Tx = UnboundedSender<Message>;
 type Am<T> = Arc<Mutex<T>>;
 pub type PubSubState = Am<HashMap<SocketAddr, Tx>>;
 
-mod prelude {
+pub mod prelude {
     use tokio;
     use crate::launch_server;
 }
