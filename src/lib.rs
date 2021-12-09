@@ -84,7 +84,7 @@ async fn json_server_conn_handler(state: ServerState, raw_stream: TcpStream, add
     state.lock().unwrap().remove(&addr);
 }
 
-pub async fn launch_server<T: Serialize + Send + 'static, U: ToSocketAddrs + Send + 'static>(
+pub async fn spinup<T: Serialize + Send + 'static, U: ToSocketAddrs + Send + 'static>(
     source: Receiver<T>,
     addr: U,
     name: &'static str
