@@ -19,7 +19,9 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::protocol::Message;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+
+use tracing::{span, event, instrument, Level};
 
 type Tx = UnboundedSender<Message>;
 type Am<T> = Arc<Mutex<T>>;
@@ -30,37 +32,61 @@ pub type ServerState = Am<HashMap<SocketAddr, Tx>>;
  * No longer! With the new changes this is almost costless in terms of compute.
  * Costs around 308kb of ram tho
  */
-async fn intermediary<T: Serialize>(rx: Receiver<T>, subs: ServerState, server_name: &str) {
-    println!("[SUCCESS]: {}: DATA PIPELINE CONSTRUCTED", server_name);
+#[instrument(level="info")]
+async fn intermediary<T: Serialize + std::fmt::Debug>(rx: Receiver<T>, subs: ServerState, server_name: &str) {
+    event!(Level::INFO, "Data pipeline successfully constructed for server {}", server_name);
 
     for x in rx.iter() {
         if let Ok(s) = serde_json::to_string(&x) {
+            event!(Level::DEBUG, "New message {} received by datapipeline, successfully serialized, publishing.", s);
             let msg = Message::Text(s);
             tokio::spawn(publish_handler(subs.clone(), msg));
+        } else {
+            event!(Level::ERROR, "New message {:?} received by datapipeline, failure to serialize, not publishing, nonfatal.", &x);
         }
     }
 
     // we need to kill the channel?
 }
 
-async fn publish_handler(recipients: ServerState, message: Message) {
-    let tmp = recipients.lock().unwrap(); // got a poison error on this thing when killing 200 conns at once
+#[instrument(level="debug")]
+async fn publish_handler(recipients: ServerState, message: Message) -> Result<()> {
+    //let tmp = recipients.lock().unwrap(); // got a poison error on this thing when killing 200 conns at once
+
+    /*let tmp = match  {
+        Ok(mut x) => {x},
+        Err(_) => {event!(Level::ERROR, "Failed to get a lock on state!");},
+    };*/
+
+    let tmp = recipients.lock().unwrap();
 
     for (_, sock) in tmp.iter() { // might be able to parallelize further using Rayon. might not be a good idea tho
-        sock.unbounded_send(message.clone());//.unwrap(); // unused result
+        if let Ok(_) = sock.unbounded_send(message.clone()) {
+            event!(Level::TRACE, "Message successfully sent");
+        } else {
+            event!(Level::ERROR, "Message failed to send");
+        }
     }
+
+    Ok(())
 }
 
-async fn listener<K: ToSocketAddrs>(bind_addr: K, state: ServerState, server_name: &'static str) -> Result<()> {
-    let tcp_socket = TcpListener::bind(bind_addr).await?;
-    println!(
-        "[SUCCESS]: {}: LISTENER BOUND TO {}",
-        server_name,
-        tcp_socket.local_addr().unwrap()
-    );
+#[instrument(level="info")]
+async fn listener<K: ToSocketAddrs + std::fmt::Debug>(bind_addr: K, state: ServerState, server_name: &'static str) -> Result<()> {
+    
+    let tcp_socket = match TcpListener::bind(bind_addr).await {
+        Ok(x) => {
+            event!(Level::INFO, "TCP Listener for server {} bound to {}", server_name, x.local_addr().unwrap());
+            x
+        },
+        Err(x) => {
+            event!(Level::ERROR, "TCP Listener for server {} failed to bind!", server_name);
+            return Err(anyhow!(x));
+        }
+    };
 
     while let Ok((stream, addr)) = tcp_socket.accept().await {
-        println!("Spawning new conn!");
+        event!(Level::INFO, "Server {} is spawning new connection at {}", server_name, addr);
         tokio::spawn(json_server_conn_handler(state.clone(), stream, addr, server_name));
     }
 
@@ -68,23 +94,36 @@ async fn listener<K: ToSocketAddrs>(bind_addr: K, state: ServerState, server_nam
     Ok(())
 }
 
+#[instrument(level="debug")]
 async fn json_server_conn_handler(state: ServerState, raw_stream: TcpStream, addr: SocketAddr, server_name: &str) {
     let ws_stream = tokio_tungstenite::accept_async(raw_stream)
         .await
         .expect(&format!("[ERROR]: {}: error accepting connection from {}", server_name, addr));
 
     let (tx, rx) = unbounded();
-    state.lock().unwrap().insert(addr, tx);
+
+    match state.lock() {
+        Ok(mut x) => {x.insert(addr, tx);},
+        Err(_) => {event!(Level::ERROR, "Failed to get a lock on state!");},
+    };
 
     let (outgoing, _) = ws_stream.split();
 
     let receiver = rx.map(Ok).forward(outgoing);
-    receiver.await;// unused result
+    match receiver.await {
+        Ok(_) => {
+            event!(Level::DEBUG, "Receiver exited with no error.");
+        },
+        Err(e) => {
+            event!(Level::DEBUG, "Receiver exited with error {}.", e);
+        },
+    };// unused result
 
     state.lock().unwrap().remove(&addr);
 }
 
-pub async fn spinup<T: Serialize + Send + 'static, U: ToSocketAddrs + Send + 'static>(
+#[instrument(level="info")]
+pub async fn spinup<T: Serialize + Send + 'static + std::fmt::Debug, U: ToSocketAddrs + Send + 'static + std::fmt::Debug>(
     source: Receiver<T>,
     addr: U,
     name: &'static str
