@@ -43,7 +43,7 @@ async fn intermediary<T: Serialize>(rx: Receiver<T>, subs: ServerState, server_n
     // we need to kill the channel?
 }
 
-async fn ballista(recipients: ServerState, message: Message) {
+async fn publish_handler(recipients: ServerState, message: Message) {
     let tmp = recipients.lock().unwrap(); // got a poison error on this thing when killing 200 conns at once
 
     for (_, sock) in tmp.iter() { // might be able to parallelize further using Rayon. might not be a good idea tho
