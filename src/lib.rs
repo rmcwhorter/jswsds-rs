@@ -26,7 +26,7 @@ type Am<T> = Arc<Mutex<T>>;
 pub type ServerState = Am<HashMap<SocketAddr, Tx>>;
 
 /**
- * !This thread is always looping as fast as possible, this is inefficient
+ * This thread is always looping as fast as possible, this is inefficient
  * No longer! With the new changes this is almost costless in terms of compute.
  * Costs around 308kb of ram tho
  */
@@ -36,7 +36,7 @@ async fn intermediary<T: Serialize>(rx: Receiver<T>, subs: ServerState, server_n
     for x in rx.iter() {
         if let Ok(s) = serde_json::to_string(&x) {
             let msg = Message::Text(s);
-            tokio::spawn(ballista(subs.clone(), msg));
+            tokio::spawn(publish_handler(subs.clone(), msg));
         }
     }
 
