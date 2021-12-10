@@ -7,6 +7,9 @@ use serde::Serialize;
  * secondly, we have some websockets connection
  * we forward that data along
 */
+
+use tracing::{event, instrument, Level};
+
 use std::{
     collections::HashMap,
     marker::Send,
@@ -21,7 +24,6 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 
 use anyhow::{anyhow, Result};
 
-use tracing::{span, event, instrument, Level};
 
 type Tx = UnboundedSender<Message>;
 type Am<T> = Arc<Mutex<T>>;
@@ -32,9 +34,9 @@ pub type ServerState = Am<HashMap<SocketAddr, Tx>>;
  * No longer! With the new changes this is almost costless in terms of compute.
  * Costs around 308kb of ram tho
  */
-#[instrument(level="info")]
+#[instrument(level="debug")]
 async fn intermediary<T: Serialize + std::fmt::Debug>(rx: Receiver<T>, subs: ServerState, server_name: &str) {
-    event!(Level::INFO, "Data pipeline successfully constructed for server {}", server_name);
+    event!(Level::DEBUG, "Data pipeline successfully constructed for server {}", server_name);
 
     for x in rx.iter() {
         if let Ok(s) = serde_json::to_string(&x) {
@@ -51,29 +53,17 @@ async fn intermediary<T: Serialize + std::fmt::Debug>(rx: Receiver<T>, subs: Ser
 
 #[instrument(level="debug")]
 async fn publish_handler(recipients: ServerState, message: Message) -> Result<()> {
-    //let tmp = recipients.lock().unwrap(); // got a poison error on this thing when killing 200 conns at once
-
-    /*let tmp = match  {
-        Ok(mut x) => {x},
-        Err(_) => {event!(Level::ERROR, "Failed to get a lock on state!");},
-    };*/
-
     let tmp = recipients.lock().unwrap();
-
+    //event!(Level::TRACE, "Message successfully sent");
     for (_, sock) in tmp.iter() { // might be able to parallelize further using Rayon. might not be a good idea tho
-        if let Ok(_) = sock.unbounded_send(message.clone()) {
-            event!(Level::TRACE, "Message successfully sent");
-        } else {
-            event!(Level::ERROR, "Message failed to send");
-        }
+        sock.unbounded_send(message.clone());
     }
 
     Ok(())
 }
 
-#[instrument(level="info")]
+#[instrument(level="debug")]
 async fn listener<K: ToSocketAddrs + std::fmt::Debug>(bind_addr: K, state: ServerState, server_name: &'static str) -> Result<()> {
-    
     let tcp_socket = match TcpListener::bind(bind_addr).await {
         Ok(x) => {
             event!(Level::INFO, "TCP Listener for server {} bound to {}", server_name, x.local_addr().unwrap());
