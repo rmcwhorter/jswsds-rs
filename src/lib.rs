@@ -36,7 +36,7 @@ pub type ServerState = Am<HashMap<SocketAddr, Tx>>;
  */
 #[instrument(level="debug")]
 async fn intermediary<T: Serialize + std::fmt::Debug>(rx: Receiver<T>, subs: ServerState, server_name: &str) {
-    event!(Level::DEBUG, "Data pipeline successfully constructed for server {}", server_name);
+    event!(Level::INFO, "Data pipeline successfully constructed for server {}", server_name);
 
     for x in rx.iter() {
         if let Ok(s) = serde_json::to_string(&x) {
@@ -76,11 +76,10 @@ async fn listener<K: ToSocketAddrs + std::fmt::Debug>(bind_addr: K, state: Serve
     };
 
     while let Ok((stream, addr)) = tcp_socket.accept().await {
-        event!(Level::INFO, "Server {} is spawning new connection at {}", server_name, addr);
         tokio::spawn(json_server_conn_handler(state.clone(), stream, addr, server_name));
     }
 
-    println!("listener death");
+    event!(Level::ERROR, "TCP Listener for server {} died!", server_name);
     Ok(())
 }
 
@@ -92,8 +91,12 @@ async fn json_server_conn_handler(state: ServerState, raw_stream: TcpStream, add
 
     let (tx, rx) = unbounded();
 
+
     match state.lock() {
-        Ok(mut x) => {x.insert(addr, tx);},
+        Ok(mut x) => {
+            x.insert(addr, tx);
+            event!(Level::INFO, "{} spawned new connection at {}, {} conns outstanding", server_name, addr, x.len());
+        },
         Err(_) => {event!(Level::ERROR, "Failed to get a lock on state!");},
     };
 
@@ -105,11 +108,18 @@ async fn json_server_conn_handler(state: ServerState, raw_stream: TcpStream, add
             event!(Level::DEBUG, "Receiver exited with no error.");
         },
         Err(e) => {
-            event!(Level::DEBUG, "Receiver exited with error {}.", e);
+            event!(Level::ERROR, "Receiver exited with error {}.", e);
         },
     };// unused result
 
-    state.lock().unwrap().remove(&addr);
+    match state.lock() {
+        Ok(mut x) => {
+            x.remove(&addr);
+            event!(Level::INFO, "{} dropped connection at {}, {} conns outstanding", server_name, addr, x.len());
+        },
+        Err(_) => {event!(Level::ERROR, "Failed to get a lock on state!");},
+    };
+
 }
 
 #[instrument(level="info")]
@@ -118,8 +128,12 @@ pub async fn spinup<T: Serialize + Send + 'static + std::fmt::Debug, U: ToSocket
     addr: U,
     name: &'static str
 ) -> ServerState {
+    event!(Level::INFO, "Attempting to start serder {}", name);
     let state: ServerState = Arc::new(Mutex::new(HashMap::new()));
     task::spawn(listener(addr, state.clone(), name));
     task::spawn(intermediary(source, state.clone(), name));
     state
 }
+
+//let subscriber = Registry::default().with(otel_layer); // really we don't want to be storing logs in memory, because we us ALOT of it if we're going fast.
+
