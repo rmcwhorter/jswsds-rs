@@ -130,7 +130,6 @@ async fn json_server_conn_handler(state: ServerState, raw_stream: TcpStream, add
         },
         Err(_) => {event!(Level::ERROR, "Failed to get a lock on state!");},
     };
-
 }
 
 #[instrument(level="info")]
