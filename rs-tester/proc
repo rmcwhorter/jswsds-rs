@@ -1,0 +1,1 @@
+cd $RUBI/rs-tester/target/release && ./rs-tester

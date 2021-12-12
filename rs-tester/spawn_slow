@@ -1,0 +1,5 @@
+for ((i = 0 ; i < $1 ; i++)); do
+  ./proc &
+  sleep 0.1
+done
+wait

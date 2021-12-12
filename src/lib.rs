@@ -25,6 +25,8 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use anyhow::{anyhow, Result};
 
 
+use futures_util::{future, pin_mut, stream::TryStreamExt};
+
 type Tx = UnboundedSender<Message>;
 type Am<T> = Arc<Mutex<T>>;
 pub type ServerState = Am<HashMap<SocketAddr, Tx>>;
@@ -75,9 +77,15 @@ async fn listener<K: ToSocketAddrs + std::fmt::Debug>(bind_addr: K, state: Serve
         }
     };
 
-    while let Ok((stream, addr)) = tcp_socket.accept().await {
-        tokio::spawn(json_server_conn_handler(state.clone(), stream, addr, server_name));
+    loop {
+        if let Ok((stream, addr)) = tcp_socket.accept().await {
+            tokio::spawn(json_server_conn_handler(state.clone(), stream, addr, server_name));
+        } else {
+            event!(Level::ERROR, "TCP Listener for server {} tried to accept a connection and failed!", server_name);
+        }
     }
+
+    //while 
 
     event!(Level::ERROR, "TCP Listener for server {} died!", server_name);
     Ok(())
@@ -100,9 +108,37 @@ async fn json_server_conn_handler(state: ServerState, raw_stream: TcpStream, add
         Err(_) => {event!(Level::ERROR, "Failed to get a lock on state!");},
     };
 
-    let (outgoing, _) = ws_stream.split();
+    let (outgoing, incoming) = ws_stream.split();
 
     let receiver = rx.map(Ok).forward(outgoing);
+
+    incoming.try_for_each(|msg| {
+        match msg {
+            Message::Text(x) => {
+                event!(Level::WARN, "{} unexpectedly received text {}", server_name, x);
+                future::ok(())
+            },
+            Message::Binary(x) => {
+                event!(Level::WARN, "{} unexpectedly received binary {:?}", server_name, x);
+                future::ok(())
+            },
+            Message::Ping(x) => {
+                event!(Level::TRACE, "{} received a ping, sending a pong.", server_name);
+                //pin_mut!(outgoing).start_send(Message::Pong(x));
+                //.forward(outgoing);
+                future::ok(())
+            },
+            Message::Pong(x) => {
+                event!(Level::TRACE, "{} received a pong, sending nothing.", server_name);
+                future::ok(())
+            },
+            Message::Close(_) => {
+                event!(Level::INFO, "{} received a close request from client.", server_name);
+                future::err(())
+            },
+        }
+    }).await.unwrap();
+
     match receiver.await {
         Ok(_) => {
             event!(Level::DEBUG, "Receiver exited with no error.");
@@ -135,5 +171,11 @@ pub async fn spinup<T: Serialize + Send + 'static + std::fmt::Debug, U: ToSocket
     state
 }
 
-//let subscriber = Registry::default().with(otel_layer); // really we don't want to be storing logs in memory, because we us ALOT of it if we're going fast.
+/*
+ * TODO: Right now we run into the max number of connections we can have on one TCP socket before the system hits its limits
+ * TODO: Up the system limits
+ * TODO: Fix the Jaeger logging system - uses arbitrarily much RAM, really really fast. Logs need to be stored on a DB I think.
+ * TODO: we might not even need Jaeger logging tbh, even though it's cool at this point. 
+ * TODO: https://stackoverflow.com/questions/22090229/how-did-whatsapp-achieve-2-million-connections-per-server
+ */
 
