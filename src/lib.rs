@@ -25,7 +25,7 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use anyhow::{anyhow, Result};
 
 
-use futures_util::{future, pin_mut, stream::TryStreamExt};
+//use futures_util::{future, pin_mut, stream::TryStreamExt};
 
 type Tx = UnboundedSender<Message>;
 type Am<T> = Arc<Mutex<T>>;
@@ -37,14 +37,14 @@ pub type ServerState = Am<HashMap<SocketAddr, Tx>>;
  * Costs around 308kb of ram tho
  */
 #[instrument(level="debug")]
-async fn intermediary<T: Serialize + std::fmt::Debug>(rx: Receiver<T>, subs: ServerState, server_name: &str) {
+async fn intermediary<T: Serialize + std::fmt::Debug>(rx: Receiver<T>, subs: ServerState, server_name: &'static str) {
     event!(Level::INFO, "Data pipeline successfully constructed for server {}", server_name);
 
     for x in rx.iter() {
         if let Ok(s) = serde_json::to_string(&x) {
             event!(Level::DEBUG, "New message {} received by datapipeline, successfully serialized, publishing.", s);
             let msg = Message::Text(s);
-            tokio::spawn(publish_handler(subs.clone(), msg));
+            tokio::spawn(publish_handler(subs.clone(), msg, server_name));
         } else {
             event!(Level::ERROR, "New message {:?} received by datapipeline, failure to serialize, not publishing, nonfatal.", &x);
         }
@@ -54,11 +54,13 @@ async fn intermediary<T: Serialize + std::fmt::Debug>(rx: Receiver<T>, subs: Ser
 }
 
 #[instrument(level="debug")]
-async fn publish_handler(recipients: ServerState, message: Message) -> Result<()> {
+async fn publish_handler(recipients: ServerState, message: Message, server_name: &str) -> Result<()> {
     let tmp = recipients.lock().unwrap();
-    //event!(Level::TRACE, "Message successfully sent");
     for (_, sock) in tmp.iter() { // might be able to parallelize further using Rayon. might not be a good idea tho
-        sock.unbounded_send(message.clone());
+        match sock.unbounded_send(message.clone()) {
+            Ok(_) => {},
+            Err(err) => {event!(Level::ERROR, "publish_handler on server {} encountered an error: {}", server_name, err);},
+        }
     }
 
     Ok(())
@@ -87,8 +89,8 @@ async fn listener<K: ToSocketAddrs + std::fmt::Debug>(bind_addr: K, state: Serve
 
     //while 
 
-    event!(Level::ERROR, "TCP Listener for server {} died!", server_name);
-    Ok(())
+    //event!(Level::ERROR, "TCP Listener for server {} died!", server_name);
+    //Ok(())
 }
 
 #[instrument(level="debug")]
@@ -108,36 +110,9 @@ async fn json_server_conn_handler(state: ServerState, raw_stream: TcpStream, add
         Err(_) => {event!(Level::ERROR, "Failed to get a lock on state!");},
     };
 
-    let (outgoing, incoming) = ws_stream.split();
+    let (outgoing, _) = ws_stream.split();
 
     let receiver = rx.map(Ok).forward(outgoing);
-
-    incoming.try_for_each(|msg| {
-        match msg {
-            Message::Text(x) => {
-                event!(Level::WARN, "{} unexpectedly received text {}", server_name, x);
-                future::ok(())
-            },
-            Message::Binary(x) => {
-                event!(Level::WARN, "{} unexpectedly received binary {:?}", server_name, x);
-                future::ok(())
-            },
-            Message::Ping(x) => {
-                event!(Level::TRACE, "{} received a ping, sending a pong.", server_name);
-                //pin_mut!(outgoing).start_send(Message::Pong(x));
-                //.forward(outgoing);
-                future::ok(())
-            },
-            Message::Pong(x) => {
-                event!(Level::TRACE, "{} received a pong, sending nothing.", server_name);
-                future::ok(())
-            },
-            Message::Close(_) => {
-                event!(Level::INFO, "{} received a close request from client.", server_name);
-                future::err(())
-            },
-        }
-    }).await.unwrap();
 
     match receiver.await {
         Ok(_) => {
@@ -172,10 +147,11 @@ pub async fn spinup<T: Serialize + Send + 'static + std::fmt::Debug, U: ToSocket
 }
 
 /*
- * TODO: Right now we run into the max number of connections we can have on one TCP socket before the system hits its limits
+ * TODO: Right now we run into the max number of connections we can have on one TCP socket before the code hits its limits
  * TODO: Up the system limits
  * TODO: Fix the Jaeger logging system - uses arbitrarily much RAM, really really fast. Logs need to be stored on a DB I think.
  * TODO: we might not even need Jaeger logging tbh, even though it's cool at this point. 
  * TODO: https://stackoverflow.com/questions/22090229/how-did-whatsapp-achieve-2-million-connections-per-server
+ * TODO: How do we handle messages sent from the other side? Rn we don't do anything with them, and just error out if they disconnect. Good for now. 
  */
 
