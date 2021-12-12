@@ -1,5 +1,5 @@
 [package]
-name = "jswsds-rs"
+name = "jwd"
 version = "0.1.0"
 edition = "2021"
 
